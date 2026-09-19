@@ -331,6 +331,12 @@ const DASHBOARD_HTML = `<!doctype html>
   }
   .field{display:flex;flex-direction:column;gap:5px;}
   .confirm-row{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted);margin-top:2px;}
+  .amount-presets{display:flex;gap:6px;margin-bottom:6px;}
+  .amount-presets button{
+    background:var(--panel);border:1px solid var(--line);color:var(--muted);
+    padding:6px 12px;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;
+  }
+  .amount-presets button.active,.amount-presets button:hover{border-color:var(--buy);color:var(--buy);}
 
   button.submit{
     margin-top:6px;padding:12px;border:none;border-radius:6px;font-weight:600;font-size:13px;
@@ -435,9 +441,22 @@ const DASHBOARD_HTML = `<!doctype html>
   <div class="panel" id="panel-sol">
   <main>
     <section>
-      <h2>Wallet</h2>
-      <div id="solWalletBox"><div class="empty">loading…</div></div>
-      <div class="refresh-note" style="margin-top:10px;">Use a burner wallet only — never one holding funds you can't lose.</div>
+      <h2>Your Wallet</h2>
+      <div id="solWalletBox">
+        <div class="empty" id="solWalletEmpty">No wallet connected yet.</div>
+        <div id="solWalletConnected" style="display:none;">
+          <div class="bal-row"><span>address</span><span class="amt" id="solWalletAddr">—</span></div>
+          <button type="button" class="submit" style="margin-top:8px;background:transparent;border:1px solid var(--line);" id="solDisconnectBtn">Disconnect</button>
+        </div>
+      </div>
+      <form id="solConnectForm" style="margin-top:10px;">
+        <div class="field">
+          <label>Paste wallet private key (base58)</label>
+          <input type="password" id="solPrivateKeyInput" placeholder="paste here — stays in this browser only" />
+        </div>
+        <button type="submit" class="submit" style="margin-top:8px;">Connect</button>
+      </form>
+      <div class="refresh-note" style="margin-top:10px;">Use a brand-new burner wallet only — never one holding money you'd miss. This key is kept in your browser and sent only when you swap; it is never saved on the server.</div>
 
       <h2 style="margin-top:22px;">Screener</h2>
       <div class="refresh-note" style="margin-bottom:8px;">Ranked by current volume/liquidity/momentum — not a prediction. Click one to load it.</div>
@@ -448,26 +467,50 @@ const DASHBOARD_HTML = `<!doctype html>
       <div class="price-block">
         <input class="symbol-input mono" id="mintInput" placeholder="token mint address" style="width:100%;" />
         <div class="price-big" id="solPriceBig">—</div>
-        <div class="price-sym"><span id="mintLabel">paste a Solana token mint above</span></div>
+        <div class="price-sym"><span id="mintLabel">paste a Solana token mint above, or tap one from the Screener</span></div>
       </div>
 
-      <h2>Swap</h2>
+      <h2>Buy / Sell this token</h2>
       <form class="order" id="solOrderForm">
         <div class="side-toggle">
           <button type="button" data-side="buy" class="active">BUY (SOL→token)</button>
           <button type="button" data-side="sell">SELL (token→SOL)</button>
         </div>
+
+        <div class="field">
+          <label>When</label>
+          <div class="side-toggle" id="solWhenToggle">
+            <button type="button" data-when="now" class="active">Right now</button>
+            <button type="button" data-when="later">At a price I set</button>
+          </div>
+        </div>
+
+        <div class="field" id="solTargetField" style="display:none;">
+          <label>Trigger price (USD)</label>
+          <input type="number" step="any" id="solTargetPrice" placeholder="e.g. 0.0004" />
+          <div class="refresh-note" style="margin-top:4px;" id="solConditionNote">Will buy once the price rises to or above this.</div>
+        </div>
+
         <div class="field">
           <label>Amount (SOL)</label>
-          <input type="number" step="any" id="solAmountInput" placeholder="0.05" required />
+          <div class="amount-presets" id="solAmountPresets">
+            <button type="button" data-amt="0.01">0.01</button>
+            <button type="button" data-amt="0.05" class="active">0.05</button>
+            <button type="button" data-amt="0.1">0.1</button>
+            <button type="button" data-amt="0.25">0.25</button>
+          </div>
+          <input type="number" step="any" id="solAmountInput" value="0.05" />
         </div>
         <div class="confirm-row">
           <input type="checkbox" id="solConfirmCheck" />
-          <span>Send live (unchecked = simulate only)</span>
+          <span>Actually send this trade (unchecked = practice run, nothing real happens)</span>
         </div>
-        <button type="submit" class="submit">Submit swap</button>
+        <button type="submit" class="submit" id="solSubmitBtn">Buy / Sell</button>
       </form>
-      <div class="refresh-note">Swaps route through MAX_SOL_PER_TRADE and slippage limits regardless of this toggle. No strategy here guarantees profit — memecoins can go to zero.</div>
+      <div class="refresh-note">Swaps route through MAX_SOL_PER_TRADE and slippage limits regardless of this toggle. No strategy here guarantees profit — memecoins can go to zero. Price rules only work while this server is running — a sleeping free-tier Render instance won't catch a trigger.</div>
+
+      <h2 style="margin-top:22px;">Active price rules</h2>
+      <div id="solRulesBox"><div class="empty">none yet</div></div>
     </section>
 
     <section>
@@ -621,6 +664,7 @@ document.querySelectorAll(".tab").forEach(tab => {
 // ---- Solana memecoin panel ----
 let solSide = "buy";
 let currentMint = "";
+const SOL_KEY_STORAGE = "syn_sol_wallet_key";
 
 function solLog(text, cls) {
   const box = document.getElementById("solLogBox");
@@ -630,25 +674,49 @@ function solLog(text, cls) {
   box.prepend(el);
 }
 
-async function loadSolStatus() {
-  try {
-    const r = await fetch("/api/sol/status").then(r => r.json());
-    const box = document.getElementById("solWalletBox");
-    if (!r.walletConnected) {
-      box.innerHTML = \`<div class="empty">no SOL_PRIVATE_KEY set — dry run only</div>\`;
-    } else {
-      box.innerHTML = \`<div class="bal-row"><span>address</span><span class="amt">\${r.walletAddress.slice(0,4)}…\${r.walletAddress.slice(-4)}</span></div>
-        <div class="bal-row"><span>mode</span><span class="amt">\${r.dryRun ? "DRY RUN" : "LIVE"}</span></div>
-        <div class="bal-row"><span>cap/trade</span><span class="amt">\${r.maxSolPerTrade} SOL</span></div>\`;
-    }
-  } catch (e) { solLog("status check failed: " + e.message, "err"); }
+function getSavedWalletKey() {
+  try { return localStorage.getItem(SOL_KEY_STORAGE) || ""; } catch (e) { return ""; }
 }
+
+function renderWalletBox() {
+  const key = getSavedWalletKey();
+  const emptyBox = document.getElementById("solWalletEmpty");
+  const connectedBox = document.getElementById("solWalletConnected");
+  const form = document.getElementById("solConnectForm");
+  if (key) {
+    emptyBox.style.display = "none";
+    connectedBox.style.display = "";
+    form.style.display = "none";
+    document.getElementById("solWalletAddr").textContent = "connected · key stored in this browser";
+  } else {
+    emptyBox.style.display = "";
+    connectedBox.style.display = "none";
+    form.style.display = "";
+  }
+}
+
+document.getElementById("solConnectForm").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const key = document.getElementById("solPrivateKeyInput").value.trim();
+  if (!key) return;
+  try { localStorage.setItem(SOL_KEY_STORAGE, key); } catch (err) {}
+  document.getElementById("solPrivateKeyInput").value = "";
+  renderWalletBox();
+  solLog("wallet connected (stored in this browser only)", "sim");
+});
+
+document.getElementById("solDisconnectBtn").addEventListener("click", () => {
+  try { localStorage.removeItem(SOL_KEY_STORAGE); } catch (err) {}
+  renderWalletBox();
+  solLog("wallet disconnected");
+});
 
 async function loadSolPrice() {
   if (!currentMint) return;
   try {
     const r = await fetch("/api/sol/price?mint=" + encodeURIComponent(currentMint)).then(r => r.json());
     if (r.error) { document.getElementById("solPriceBig").textContent = "—"; document.getElementById("mintLabel").textContent = r.error; return; }
+    lastKnownPrice = r.priceUsd;
     document.getElementById("solPriceBig").textContent = "$" + r.priceUsd.toLocaleString(undefined,{maximumFractionDigits:8});
     document.getElementById("mintLabel").textContent = currentMint.slice(0,4) + "…" + currentMint.slice(-4);
   } catch (e) { /* leave last known price on screen */ }
@@ -667,30 +735,109 @@ document.querySelectorAll("#solOrderForm .side-toggle button").forEach(btn => {
   });
 });
 
+document.querySelectorAll("#solAmountPresets button").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll("#solAmountPresets button").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    document.getElementById("solAmountInput").value = btn.dataset.amt;
+  });
+});
+document.getElementById("solAmountInput").addEventListener("input", () => {
+  document.querySelectorAll("#solAmountPresets button").forEach(b => b.classList.remove("active"));
+});
+
+// ---- "Right now" vs "At a price I set" ----
+let solWhen = "now";
+let lastKnownPrice = null;
+
+document.querySelectorAll("#solWhenToggle button").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll("#solWhenToggle button").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    solWhen = btn.dataset.when;
+    document.getElementById("solTargetField").style.display = solWhen === "later" ? "" : "none";
+    document.getElementById("solSubmitBtn").textContent = solWhen === "later" ? "Set price rule" : "Buy / Sell";
+  });
+});
+
+document.getElementById("solTargetPrice").addEventListener("input", (e) => {
+  const target = parseFloat(e.target.value);
+  const note = document.getElementById("solConditionNote");
+  if (!target || lastKnownPrice == null) { note.textContent = "Will trigger once the price crosses this."; return; }
+  note.textContent = target < lastKnownPrice
+    ? \`Currently $\${lastKnownPrice} — will trigger once it drops to this.\`
+    : \`Currently $\${lastKnownPrice} — will trigger once it rises to this.\`;
+});
+
 document.getElementById("solOrderForm").addEventListener("submit", async (e) => {
   e.preventDefault();
-  if (!currentMint) { solLog("paste a token mint address first", "err"); return; }
+  if (!currentMint) { solLog("pick a token first — tap one in the Screener list", "err"); return; }
   const amountSol = parseFloat(document.getElementById("solAmountInput").value);
   const confirm = document.getElementById("solConfirmCheck").checked;
+  const walletPrivateKey = getSavedWalletKey();
+  if (confirm && !walletPrivateKey) { solLog("connect a wallet first to send a real trade", "err"); return; }
+
+  if (solWhen === "later") {
+    const targetPrice = parseFloat(document.getElementById("solTargetPrice").value);
+    if (!targetPrice) { solLog("enter a trigger price first", "err"); return; }
+    const condition = (lastKnownPrice != null && targetPrice < lastKnownPrice) ? "below" : "above";
+    try {
+      const r = await fetch("/api/sol/rules", {
+        method: "POST", headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({
+          mint: currentMint, symbol: document.getElementById("mintLabel").textContent,
+          side: solSide, condition, targetPrice, amountSol, confirm, walletPrivateKey
+        })
+      }).then(r => r.json());
+      if (r.error) { solLog("error: " + r.error, "err"); return; }
+      solLog(\`Rule set — will \${solSide} when price goes \${condition} $\${targetPrice}\`, "sim");
+      loadSolRules();
+    } catch (e) { solLog("request failed: " + e.message, "err"); }
+    return;
+  }
 
   solLog(\`sending \${solSide} \${amountSol} SOL ↔ \${currentMint.slice(0,4)}…\`);
   try {
     const r = await fetch("/api/sol/order", {
       method: "POST", headers: {"Content-Type":"application/json"},
-      body: JSON.stringify({ mint: currentMint, side: solSide, amountSol, confirm })
+      body: JSON.stringify({ mint: currentMint, side: solSide, amountSol, confirm, walletPrivateKey })
     }).then(r => r.json());
 
     if (r.error) { solLog("error: " + r.error, "err"); return; }
     if (r.blocked) { solLog("blocked: " + r.reason, "err"); return; }
     if (r.simulated) {
-      solLog(\`SIMULATED \${r.side} \${r.amountSol} SOL, est out \${r.estimatedOut}, impact \${r.priceImpactPct}%\`, "sim");
+      solLog(\`Practice run — nothing real sent (\${r.side} \${r.amountSol} SOL, est out \${r.estimatedOut})\`, "sim");
     } else {
-      solLog(\`LIVE swap sent: \${r.signature}\`, "live");
+      solLog(\`Sent: \${r.signature}\`, "live");
     }
   } catch (e) { solLog("request failed: " + e.message, "err"); }
 });
 
-loadSolStatus();
+async function loadSolRules() {
+  const box = document.getElementById("solRulesBox");
+  try {
+    const rules = await fetch("/api/sol/rules").then(r => r.json());
+    if (!Array.isArray(rules) || !rules.length) { box.innerHTML = \`<div class="empty">none yet</div>\`; return; }
+    box.innerHTML = rules.map(r => {
+      const statusColor = r.status === "pending" ? "" : (r.status === "filled" ? "up" : "down");
+      return \`<div class="bal-row" style="align-items:flex-start;">
+        <span>\${r.symbol} · \${r.side} \${r.amountSol} SOL @ \${r.condition} $\${r.targetPrice}</span>
+        <span class="amt \${statusColor}">\${r.status}\${r.status === "pending" ? \` <a href="#" data-rule-id="\${r.id}" class="cancel-rule" style="color:var(--muted);text-decoration:underline;margin-left:6px;">cancel</a>\` : ""}</span>
+      </div>\`;
+    }).join("");
+    box.querySelectorAll(".cancel-rule").forEach(a => {
+      a.addEventListener("click", async (e) => {
+        e.preventDefault();
+        await fetch("/api/sol/rules/" + a.dataset.ruleId, { method: "DELETE" });
+        loadSolRules();
+      });
+    });
+  } catch (e) { box.innerHTML = \`<div class="empty">can't load rules right now</div>\`; }
+}
+loadSolRules();
+setInterval(loadSolRules, 15000);
+
+renderWalletBox();
 setInterval(loadSolPrice, 5000);
 
 // ---- Screener ----
@@ -759,26 +906,209 @@ app.get("/api/positions", async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+async function executeCexTrade({ symbol, side, amount, price, confirm }) {
+  const ticker = await exchange.fetchTicker(symbol);
+  const notionalUsd = amount * (price || ticker.last);
+  if (notionalUsd > MAX_POSITION_USD) {
+    return { blocked: true, reason: `Notional $${notionalUsd.toFixed(2)} exceeds MAX_POSITION_USD ($${MAX_POSITION_USD})` };
+  }
+  if (DRY_RUN || !confirm) {
+    log("DRY RUN order:", { symbol, side, amount, price, notionalUsd });
+    return { simulated: true, symbol, side, amount, price: price || ticker.last, notionalUsd };
+  }
+  const order = price
+    ? await exchange.createLimitOrder(symbol, side, amount, price)
+    : await exchange.createMarketOrder(symbol, side, amount);
+  log("LIVE order placed:", order.id, symbol, side, amount);
+  return { simulated: false, order };
+}
+
 app.post("/api/order", express.json(), async (req, res) => {
   try {
     const { symbol, side, amount, price, confirm } = req.body;
-    const ticker = await exchange.fetchTicker(symbol);
-    const notionalUsd = amount * (price || ticker.last);
-
-    if (notionalUsd > MAX_POSITION_USD) {
-      return res.json({ blocked: true, reason: `Notional $${notionalUsd.toFixed(2)} exceeds MAX_POSITION_USD ($${MAX_POSITION_USD})` });
-    }
-    if (DRY_RUN || !confirm) {
-      log("DRY RUN order (dashboard):", { symbol, side, amount, price, notionalUsd });
-      return res.json({ simulated: true, symbol, side, amount, price: price || ticker.last, notionalUsd });
-    }
-    const order = price
-      ? await exchange.createLimitOrder(symbol, side, amount, price)
-      : await exchange.createMarketOrder(symbol, side, amount);
-    log("LIVE order placed (dashboard):", order.id, symbol, side, amount);
-    res.json({ simulated: false, order });
+    const result = await executeCexTrade({ symbol, side, amount, price, confirm });
+    res.json(result);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
+
+// ── Indicators (mirrors the paper-bot math on the Synapses side) ─────────
+function computeRSI(closes, period = 14) {
+  if (closes.length < period + 1) return null;
+  let gains = 0, losses = 0;
+  for (let i = closes.length - period; i < closes.length; i++) {
+    const d = closes[i] - closes[i - 1];
+    if (d >= 0) gains += d; else losses -= d;
+  }
+  const avgGain = gains / period, avgLoss = losses / period;
+  if (avgLoss === 0) return 100;
+  return 100 - 100 / (1 + avgGain / avgLoss);
+}
+function computeSMA(closes, period) {
+  if (closes.length < period) return null;
+  const slice = closes.slice(-period);
+  return slice.reduce((a, b) => a + b, 0) / period;
+}
+
+// ── Live bots: real-money automated strategies, running server-side so ──
+// they keep working even with no browser tab open. Off by default in every
+// way that matters: global DRY_RUN still gates everything, each bot also
+// needs its own confirm:true, and a tripped circuit breaker never re-arms
+// itself.
+let liveBots = [];
+let liveBotSeq = 1;
+let liveBotState = { peakEquityUsd: null, breakerTripped: false, breakerReason: null };
+const MAX_CONCURRENT_LIVE_BOTS = Number(process.env.MAX_CONCURRENT_LIVE_BOTS || 5);
+const LIVE_PORTFOLIO_DD_LIMIT_PCT = Number(process.env.LIVE_PORTFOLIO_DD_LIMIT_PCT || 10);
+
+app.get("/api/live-bots", (req, res) => {
+  res.json({
+    bots: liveBots.map(b => ({
+      id: b.id, name: b.name, symbol: b.symbol, timeframe: b.timeframe,
+      entry: b.entry, exit: b.exit, amountUsd: b.amountUsd, maxDailyLossPct: b.maxDailyLossPct,
+      confirm: b.confirm, running: b.running, status: b.status, lastSignal: b.lastSignal || null,
+      lastError: b.lastError || null, openPosition: b.openPosition || null, createdAt: b.createdAt,
+    })),
+    breaker: liveBotState,
+    maxConcurrent: MAX_CONCURRENT_LIVE_BOTS,
+    runningCount: liveBots.filter(b => b.running).length,
+  });
+});
+
+app.post("/api/live-bots", express.json(), (req, res) => {
+  const { name, symbol, timeframe, entry, exit, amountUsd, maxDailyLossPct, confirm } = req.body;
+  if (!symbol || !entry || !exit || !amountUsd) {
+    return res.status(400).json({ error: "symbol, entry, exit, amountUsd required" });
+  }
+  const runningCount = liveBots.filter(b => b.running).length;
+  if (runningCount >= MAX_CONCURRENT_LIVE_BOTS) {
+    return res.status(400).json({ error: `cap reached — ${MAX_CONCURRENT_LIVE_BOTS} live bots already running` });
+  }
+  const bot = {
+    id: String(liveBotSeq++), name: name || `${symbol} bot`, symbol, timeframe: timeframe || "1h",
+    entry, exit, amountUsd: Number(amountUsd), maxDailyLossPct: Number(maxDailyLossPct || 5),
+    confirm: !!confirm, running: true, status: "running", createdAt: Date.now(),
+    dayPnlUsd: 0, dayStamp: new Date().toDateString(), openPosition: null, lastCandleTs: null,
+  };
+  liveBots.push(bot);
+  log("live bot created:", bot.id, bot.symbol, bot.entry, "->", bot.exit, bot.confirm ? "LIVE" : "practice");
+  res.json({ id: bot.id, status: bot.status });
+});
+
+app.post("/api/live-bots/:id/stop", (req, res) => {
+  const bot = liveBots.find(b => b.id === req.params.id);
+  if (!bot) return res.status(404).json({ error: "not found" });
+  bot.running = false; bot.status = "stopped";
+  res.json({ stopped: true });
+});
+
+app.delete("/api/live-bots/:id", (req, res) => {
+  liveBots = liveBots.filter(b => b.id !== req.params.id);
+  res.json({ deleted: true });
+});
+
+app.post("/api/live-bots/reset-breaker", (req, res) => {
+  liveBotState.breakerTripped = false;
+  liveBotState.breakerReason = null;
+  liveBotState.peakEquityUsd = null; // re-measured fresh on next check
+  res.json({ ok: true });
+});
+
+async function estimateLiveEquityUsd() {
+  // Rough estimate: cash-like balances + open bot positions marked at current price.
+  // Good enough for a circuit breaker, not meant as an accounting statement.
+  let total = 0;
+  try {
+    const bal = await exchange.fetchBalance();
+    for (const [asset, amt] of Object.entries(bal.total || {})) {
+      if (["USDT", "USD", "USDC", "BUSD"].includes(asset)) total += amt;
+    }
+  } catch (e) { /* balance fetch can fail without keys — fine, just less accurate */ }
+  for (const bot of liveBots) {
+    if (bot.openPosition) {
+      try {
+        const ticker = await exchange.fetchTicker(bot.symbol);
+        total += bot.openPosition.qty * ticker.last;
+      } catch (e) {}
+    }
+  }
+  return total;
+}
+
+async function checkLiveBots() {
+  if (!liveBots.some(b => b.running)) return;
+
+  // Portfolio-wide circuit breaker check first — same shape as the Synapses side.
+  const eq = await estimateLiveEquityUsd();
+  if (eq > 0) {
+    if (liveBotState.peakEquityUsd == null || eq > liveBotState.peakEquityUsd) liveBotState.peakEquityUsd = eq;
+    const dd = ((liveBotState.peakEquityUsd - eq) / liveBotState.peakEquityUsd) * 100;
+    if (dd >= LIVE_PORTFOLIO_DD_LIMIT_PCT && !liveBotState.breakerTripped) {
+      liveBotState.breakerTripped = true;
+      liveBotState.breakerReason = `Portfolio down ${dd.toFixed(1)}% from peak — all live bots stopped.`;
+      liveBots.forEach(b => { if (b.running) { b.running = false; b.status = "stopped (circuit breaker)"; } });
+      log("LIVE BOT CIRCUIT BREAKER TRIPPED:", liveBotState.breakerReason);
+      return;
+    }
+  }
+  if (liveBotState.breakerTripped) return; // stays off until manually reset
+
+  for (const bot of liveBots) {
+    if (!bot.running) continue;
+    try {
+      const today = new Date().toDateString();
+      if (bot.dayStamp !== today) { bot.dayStamp = today; bot.dayPnlUsd = 0; }
+      const dailyCap = -(bot.amountUsd * (bot.maxDailyLossPct / 100));
+      if (bot.dayPnlUsd <= dailyCap) {
+        bot.running = false; bot.status = "stopped (daily loss cap)"; continue;
+      }
+
+      const candles = await exchange.fetchOHLCV(bot.symbol, bot.timeframe, undefined, 60);
+      if (!candles || candles.length < 25) { bot.lastError = "not enough candle history yet"; continue; }
+      const closed = candles[candles.length - 2]; // last fully-closed candle
+      if (!closed) continue;
+      if (bot.lastCandleTs === closed[0]) continue; // already acted on this candle
+      bot.lastCandleTs = closed[0];
+
+      const closes = candles.slice(0, -1).map(c => c[4]);
+      const price = closed[4];
+      const rsiVal = computeRSI(closes, 14);
+      const smaVal = computeSMA(closes, 20);
+      bot.lastError = null;
+
+      const condTrue = (cond) => {
+        if (cond === "rsi_below") return rsiVal != null && rsiVal < 32;
+        if (cond === "rsi_above") return rsiVal != null && rsiVal > 68;
+        if (cond === "price_below_sma") return smaVal != null && price < smaVal;
+        if (cond === "price_above_sma") return smaVal != null && price > smaVal;
+        return false;
+      };
+
+      if (!bot.openPosition && condTrue(bot.entry)) {
+        const amount = bot.amountUsd / price;
+        const result = await executeCexTrade({ symbol: bot.symbol, side: "buy", amount, confirm: bot.confirm });
+        bot.lastSignal = "buy @ " + price;
+        if (result.error) { bot.lastError = result.error; }
+        else if (result.blocked) { bot.lastError = "blocked: " + result.reason; }
+        else { bot.openPosition = { qty: amount, entryPrice: price, openedAt: Date.now() }; }
+      } else if (bot.openPosition && condTrue(bot.exit)) {
+        const result = await executeCexTrade({ symbol: bot.symbol, side: "sell", amount: bot.openPosition.qty, confirm: bot.confirm });
+        bot.lastSignal = "sell @ " + price;
+        if (result.error) { bot.lastError = result.error; }
+        else if (result.blocked) { bot.lastError = "blocked: " + result.reason; }
+        else {
+          const pnl = (price - bot.openPosition.entryPrice) * bot.openPosition.qty;
+          bot.dayPnlUsd += pnl;
+          bot.openPosition = null;
+        }
+      } else {
+        bot.lastSignal = bot.openPosition ? "holding, waiting for exit" : "waiting for entry";
+      }
+    } catch (e) {
+      bot.lastError = e.message;
+    }
+  }
+}
+setInterval(checkLiveBots, 60000);
 
 // ---- Solana / Jupiter memecoin endpoints ----
 // mint = the token's Solana address (paste from pump.fun / dexscreener / birdeye etc)
@@ -790,6 +1120,7 @@ app.get("/api/sol/status", (req, res) => {
     maxSolPerTrade: MAX_SOL_PER_TRADE,
   });
 });
+
 
 app.get("/api/sol/price", async (req, res) => {
   try {
@@ -810,47 +1141,115 @@ async function getJupQuote(inputMint, outputMint, amountLamports) {
   return r;
 }
 
+async function executeSolTrade({ mint, side, amountSol, confirm, walletPrivateKey }) {
+  if (amountSol > MAX_SOL_PER_TRADE) {
+    return { blocked: true, reason: `${amountSol} SOL exceeds MAX_SOL_PER_TRADE (${MAX_SOL_PER_TRADE})` };
+  }
+  const lamports = Math.round(amountSol * 1e9);
+  const [inputMint, outputMint] = side === "buy" ? [SOL_MINT, mint] : [mint, SOL_MINT];
+  const quote = await getJupQuote(inputMint, outputMint, lamports);
+
+  if (SOL_DRY_RUN || !confirm) {
+    const reason = SOL_DRY_RUN ? "SOL_DRY_RUN mode is on" : "confirm=false";
+    log("DRY RUN sol order:", { mint, side, amountSol, reason });
+    return { simulated: true, side, mint, amountSol, estimatedOut: quote.outAmount, priceImpactPct: quote.priceImpactPct };
+  }
+
+  let activeWallet = solWallet;
+  if (walletPrivateKey) {
+    try { activeWallet = Keypair.fromSecretKey(bs58.decode(walletPrivateKey)); }
+    catch (e) { return { error: "that wallet key doesn't look valid" }; }
+  }
+  if (!activeWallet) return { error: "no wallet connected — paste one in the Solana tab, or set SOL_PRIVATE_KEY" };
+
+  const swapRes = await fetch("https://quote-api.jup.ag/v6/swap", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ quoteResponse: quote, userPublicKey: activeWallet.publicKey.toBase58(), wrapAndUnwrapSol: true }),
+  }).then(r => r.json());
+
+  const tx = VersionedTransaction.deserialize(Buffer.from(swapRes.swapTransaction, "base64"));
+  tx.sign([activeWallet]);
+  const signature = await connection.sendTransaction(tx);
+  log("LIVE sol order sent:", signature, mint, side, amountSol);
+  return { simulated: false, signature, mint, side, amountSol };
+}
+
 app.post("/api/sol/order", express.json(), async (req, res) => {
   try {
-    const { mint, side, amountSol, confirm } = req.body; // side: "buy" (SOL->token) or "sell" (token->SOL)
+    const { mint, side, amountSol, confirm, walletPrivateKey } = req.body;
     if (!mint || !side || !amountSol) return res.status(400).json({ error: "mint, side, amountSol required" });
-
-    if (amountSol > MAX_SOL_PER_TRADE) {
-      return res.json({ blocked: true, reason: `${amountSol} SOL exceeds MAX_SOL_PER_TRADE (${MAX_SOL_PER_TRADE})` });
-    }
-
-    const lamports = Math.round(amountSol * 1e9);
-    const [inputMint, outputMint] = side === "buy" ? [SOL_MINT, mint] : [mint, SOL_MINT];
-    const quote = await getJupQuote(inputMint, outputMint, lamports);
-
-    if (SOL_DRY_RUN || !confirm) {
-      const reason = SOL_DRY_RUN ? "SOL_DRY_RUN mode is on" : "confirm=false";
-      log("DRY RUN sol order:", { mint, side, amountSol, reason });
-      return res.json({
-        simulated: true, side, mint, amountSol,
-        estimatedOut: quote.outAmount, priceImpactPct: quote.priceImpactPct,
-      });
-    }
-
-    if (!solWallet) return res.status(400).json({ error: "no SOL_PRIVATE_KEY configured — can't send live" });
-
-    const swapRes = await fetch("https://quote-api.jup.ag/v6/swap", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        quoteResponse: quote,
-        userPublicKey: solWallet.publicKey.toBase58(),
-        wrapAndUnwrapSol: true,
-      }),
-    }).then(r => r.json());
-
-    const tx = VersionedTransaction.deserialize(Buffer.from(swapRes.swapTransaction, "base64"));
-    tx.sign([solWallet]);
-    const signature = await connection.sendTransaction(tx);
-    log("LIVE sol order sent:", signature, mint, side, amountSol);
-    res.json({ simulated: false, signature, mint, side, amountSol });
+    const result = await executeSolTrade({ mint, side, amountSol, confirm, walletPrivateKey });
+    res.json(result);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
+
+// ── Price rules: "buy/sell this token when it hits $X" ──────────────────
+// In-memory only — resets if the server restarts or Render spins it down.
+// A rule's wallet key lives in memory only for as long as the rule is pending;
+// dropped the moment it fires, errors out, or gets cancelled.
+let solRules = [];
+let solRuleSeq = 1;
+
+app.get("/api/sol/rules", (req, res) => {
+  res.json(solRules.map(r => ({
+    id: r.id, mint: r.mint, symbol: r.symbol, side: r.side, condition: r.condition,
+    targetPrice: r.targetPrice, amountSol: r.amountSol, confirm: r.confirm,
+    status: r.status, createdAt: r.createdAt, result: r.result || null,
+  }))); // never send walletPrivateKey back to the browser
+});
+
+app.post("/api/sol/rules", express.json(), (req, res) => {
+  const { mint, symbol, side, condition, targetPrice, amountSol, confirm, walletPrivateKey } = req.body;
+  if (!mint || !side || !condition || !targetPrice || !amountSol) {
+    return res.status(400).json({ error: "mint, side, condition, targetPrice, amountSol required" });
+  }
+  if (condition !== "above" && condition !== "below") {
+    return res.status(400).json({ error: "condition must be 'above' or 'below'" });
+  }
+  const rule = {
+    id: String(solRuleSeq++), mint, symbol: symbol || mint.slice(0, 4), side, condition,
+    targetPrice: Number(targetPrice), amountSol: Number(amountSol), confirm: !!confirm,
+    walletPrivateKey: walletPrivateKey || null, status: "pending", createdAt: Date.now(),
+  };
+  solRules.push(rule);
+  log("price rule created:", rule.id, rule.mint, rule.condition, rule.targetPrice);
+  res.json({ id: rule.id, status: rule.status });
+});
+
+app.delete("/api/sol/rules/:id", (req, res) => {
+  const before = solRules.length;
+  solRules = solRules.filter(r => r.id !== req.params.id);
+  res.json({ deleted: solRules.length < before });
+});
+
+async function checkSolRules() {
+  const pending = solRules.filter(r => r.status === "pending");
+  if (!pending.length) return;
+  for (const rule of pending) {
+    try {
+      const priceRes = await fetch(`https://api.jup.ag/price/v2?ids=${rule.mint}`).then(r => r.json());
+      const priceUsd = Number(priceRes.data?.[rule.mint]?.price);
+      if (!priceUsd) continue;
+
+      const hit = rule.condition === "above" ? priceUsd >= rule.targetPrice : priceUsd <= rule.targetPrice;
+      if (!hit) continue;
+
+      log("price rule triggered:", rule.id, rule.mint, "@", priceUsd);
+      const result = await executeSolTrade({
+        mint: rule.mint, side: rule.side, amountSol: rule.amountSol,
+        confirm: rule.confirm, walletPrivateKey: rule.walletPrivateKey,
+      });
+      rule.status = result.error ? "error" : (result.blocked ? "blocked" : "filled");
+      rule.result = result;
+      rule.walletPrivateKey = null; // drop the key from memory once we're done with it
+    } catch (e) {
+      rule.status = "error";
+      rule.result = { error: e.message };
+      rule.walletPrivateKey = null;
+    }
+  }
+}
+setInterval(checkSolRules, 20000);
 
 app.get("/api/sol/screener", async (req, res) => {
   try {
